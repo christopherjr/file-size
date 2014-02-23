@@ -1,0 +1,27 @@
+HKCR
+{
+	NoRemove AppID
+	{
+		'%APPID%' = s 'StatusBarExt'
+		'StatusBarExt.dll'
+		{
+			val AppID = s '%APPID%'
+		}
+	}
+}
+
+HKLM {
+  NoRemove SOFTWARE {
+    NoRemove Microsoft {   
+      NoRemove Windows {
+        NoRemove CurrentVersion {
+          NoRemove Explorer {
+            NoRemove 'Browser Helper Objects' {
+              ForceRemove '{0E1391E4-685C-4FC3-BD3F-E99C0DB9CC53}' = s 'StatusBarFileSize' 
+            }
+          }
+        }
+      }
+    }
+  }
+}

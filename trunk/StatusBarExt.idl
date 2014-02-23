@@ -1,0 +1,34 @@
+// StatusBarExt.idl : IDL source for StatusBarExt
+//
+
+// This file will be processed by the MIDL tool to
+// produce the type library (StatusBarExt.tlb) and marshalling code.
+
+import "oaidl.idl";
+import "ocidl.idl";
+
+[
+	object,
+	uuid(9D5FFF18-A24E-46E8-B6FD-37CFFD9FC37A),
+	dual,
+	nonextensible,
+	pointer_default(unique)
+]
+interface IDisplayFileSize : IDispatch{
+};
+[
+	uuid(46F90575-EC94-466C-AA64-1FAB3970A569),
+	version(1.0),
+]
+library StatusBarExtLib
+{
+	importlib("stdole2.tlb");
+	[
+		uuid(0E1391E4-685C-4FC3-BD3F-E99C0DB9CC53)		
+	]
+	coclass DisplayFileSize
+	{
+		[default] interface IDisplayFileSize;
+	};
+};
+

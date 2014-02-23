@@ -1,0 +1,26 @@
+HKCR
+{
+	StatusBarExt.FileSize.1 = s 'Status Bar File Size Extension'
+	{
+		CLSID = s '{0E1391E4-685C-4FC3-BD3F-E99C0DB9CC53}'
+	}
+	StatusBarExt.FileSize = s 'Status Bar File Size Extension'
+	{		
+		CurVer = s 'StatusBarExt.FileSize.1'
+	}
+	NoRemove CLSID
+	{
+		ForceRemove {0E1391E4-685C-4FC3-BD3F-E99C0DB9CC53} = s 'Status Bar File Size Extension'
+		{
+			ProgID = s 'StatusBarExt.FileSize.1'
+			VersionIndependentProgID = s 'StatusBarExt.FileSize'
+			ForceRemove Programmable
+			InprocServer32 = s '%MODULE%'
+			{
+				val ThreadingModel = s 'Apartment'
+			}
+			TypeLib = s '{46F90575-EC94-466C-AA64-1FAB3970A569}'
+			Version = s '1.0'
+		}
+	}
+}
