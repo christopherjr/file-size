@@ -1,0 +1,484 @@
+// Copyright (C) 2014 Chris Richardson
+// Please see the file file license.txt included with this project for licensing.
+// If no license.txt was included, see the following URL: http://opensource.org/licenses/MIT
+
+// DisplayFileSize.cpp : Implementation of CDisplayFileSize
+
+#include "stdafx.h"
+#include "DisplayFileSize.h"
+
+
+// CDisplayFileSize
+
+#include <Shobjidl.h>
+#include <Shlguid.h>
+#include <propkey.h>
+#include <propvarutil.h>
+
+// ToDo:
+//
+// Try to subclass the main view to handle the ESCAPE key.  This could then
+//  perform a deselect-all operation, which I would find useful.
+//
+// The file size calculation and update code is running each time we activate
+//  an explorer window, even if the update is not necessary. We should put in
+//  some filtering so it only runs when the size actually needs to be updated.
+//
+// Add disk free space display for appropriate folders (not sure how this is
+//  done on XP).
+
+// Add file modified time display if a single file is selected.
+//
+// We may want to make the trigger timer a bit smarter.  It is currently always
+// expiring in 100ms, which is OK for cases I tested.  It might be better to
+// make it grow slightly if we notice that a lot of the size calculations are
+// taking a long time.
+
+// Change this to 1 if you want to see some logging in the debugger.
+#define DEBUG_LOGGING 0
+
+// Timer ID for disk space status pane update.
+#define IDT_UPDATE_FILE_SIZE_PANE 1
+
+// For handling the OnDocumentComplete event.
+ATL::_ATL_FUNC_INFO DocumentComplete2Struct = {CC_STDCALL, VT_EMPTY, 2, {VT_DISPATCH, VT_BYREF|VT_VARIANT}};
+
+// Find the status bar window given a handle to the main explorer window.
+// Obviously not optimal.
+// We could possibly interrogate the browser for the status bar instead.
+HWND FindStatusBar( HWND p_hExplorerWnd )
+{
+   HWND a_hResult = NULL;
+   HWND a_hChild = GetWindow( p_hExplorerWnd, GW_CHILD );
+   while( a_hChild )
+   {
+      TCHAR a_atcClassName[128] = {0};
+      GetClassName( a_hChild, a_atcClassName, _countof( a_atcClassName ) );
+      if( !_tcscmp( a_atcClassName, _T("msctls_statusbar32") ) )
+      {
+         a_hResult = a_hChild;
+         break;
+      }
+      else
+      {
+         // Search children.
+         a_hResult = FindStatusBar( a_hChild );
+         if( a_hResult )
+         {
+            break;
+         }
+      }
+      a_hChild = GetWindow( a_hChild, GW_HWNDNEXT );
+   }
+
+   return a_hResult;
+}
+
+// CDisplayFileSize
+
+CDisplayFileSize::CDisplayFileSize() :
+   c_hExplorerWnd( NULL ),
+   c_hStatusBar( NULL ),
+   c_iPartIndex( 0 ),
+   c_bAdvised( false )
+{
+}
+
+CDisplayFileSize::~CDisplayFileSize()
+{
+}
+
+HRESULT CDisplayFileSize::SetSite(IUnknown *pUnkSite)
+{
+   HRESULT a_hResult = S_OK;
+
+   // AddRef the new site before releasing any existing site, so we don't run
+   // into problems if the site is the same as our existing site.
+   if( pUnkSite )
+   {
+      pUnkSite->AddRef();
+   }
+
+   // Detach from the status bar window so we won't try to update it while we
+   // are in the middle of this work.
+   if( c_hStatusBar )
+   {
+      RemoveWindowSubclass( c_hStatusBar, StatusBarProcS, 0 );
+   }
+
+   // Now detach from the existing site and other interfaces.
+   if( c_oSite )
+   {
+      if( c_bAdvised )
+      {
+         DispEventUnadvise( c_oSite );
+         c_bAdvised = false;
+      }
+
+      c_oSite.Release();
+   }
+   c_oServiceProvider.Release();
+   c_oPropertySystem.Release();
+   c_oFolderView.Release();
+
+   c_oSite.Attach( pUnkSite );
+   c_hExplorerWnd = NULL;
+   c_hStatusBar = NULL;
+
+   a_hResult = IObjectWithSiteImpl<CDisplayFileSize>::SetSite(pUnkSite);
+   if( FAILED( a_hResult ) )
+   {
+      return a_hResult;
+   }
+
+   // Now hook everything up using the new site.
+   if( c_oSite )
+   {
+      // The service provider lets us look up the IFolderView2 later, and the
+      // property system lets us format the file size display strings.
+      c_oServiceProvider = pUnkSite;
+      PSGetPropertySystem( IID_PPV_ARGS( &c_oPropertySystem ) );
+
+      // The IWebBrowser2 will give us the main window handle.
+      // We might also be able to use its status bar features directly but I
+      // haven't investigated that.
+      CComQIPtr<IWebBrowser2> a_oBrowser( pUnkSite );
+      if( a_oBrowser )
+      {
+         SHANDLE_PTR a_pHWnd = NULL;
+         a_hResult = a_oBrowser->get_HWND( &a_pHWnd );
+
+         if( SUCCEEDED( a_hResult ) && a_pHWnd )
+         {
+            c_hExplorerWnd = reinterpret_cast<HWND>(a_pHWnd);
+
+            // OK, so now we need to find the status bar and subclass it so we
+            // can take control of it.
+            c_hStatusBar = FindStatusBar( c_hExplorerWnd );
+            if( c_hStatusBar )
+            {
+               SetWindowSubclass( c_hStatusBar, StatusBarProcS, 0, reinterpret_cast<DWORD_PTR>(this) );
+            }
+         }
+
+         // Register for events now that we are all hooked up to the UI.
+         a_hResult = DispEventAdvise( a_oBrowser );
+         if( SUCCEEDED( a_hResult ) )
+         {
+            c_bAdvised = true;
+         }
+      }
+   }
+   return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CDisplayFileSize::OnDocumentComplete(IDispatch * pDisp, VARIANT * pvarURL)
+{
+   HRESULT a_hResult = S_OK;
+
+   UNREFERENCED_PARAMETER( pDisp );
+   UNREFERENCED_PARAMETER( pvarURL );
+
+   if( c_oServiceProvider )
+   {
+      IFolderView2 * a_poFolderView = NULL;
+
+      // Try to get the new FolderView, then release our existing FolderView and
+      // attach to the new FolderView if we got it.
+      a_hResult = c_oServiceProvider->QueryService( SID_SFolderView,
+                                                    IID_PPV_ARGS( &a_poFolderView ) );
+
+      c_oFolderView.Release();
+      if( SUCCEEDED( a_hResult ) )
+      {
+         // Note that attach does not AddRef, which is what we want.
+         c_oFolderView.Attach( a_poFolderView );
+      }
+   }
+
+   return a_hResult;
+}
+
+void CDisplayFileSize::TriggerFileSizePaneUpdate()
+{
+   // Kill and restart a 100ms timer.  If it expires before the user performs
+   // another action that triggers it, then we will perform an update.
+   // This prevents us from doing a huge amount of updates as the user performs
+   // a lot of actions in a row, such as using the keys to scroll through a
+   // large folder.
+   KillTimer( c_hStatusBar, IDT_UPDATE_FILE_SIZE_PANE );
+   SetTimer( c_hStatusBar, IDT_UPDATE_FILE_SIZE_PANE, 100, NULL );
+}
+
+void CDisplayFileSize::DoFileSizePaneUpdate()
+{
+   HRESULT a_hResult = S_OK;
+   TCHAR a_atcText[MAX_TEXT] = { 0 };
+
+   if( c_oFolderView )
+   {
+      CComPtr<IShellItemArray> a_oSelection;
+      CComPtr<IPropertyStore> a_oPropStore;
+      DWORD a_dwSelCount = 0;
+      bool a_bHaveValue = false;
+      PROPVARIANT a_vtTotalSize;
+      PropVariantInit( &a_vtTotalSize );
+
+      a_hResult = c_oFolderView->GetSelection( TRUE, &a_oSelection );
+      if( FAILED( a_hResult ) )
+      {
+         a_oSelection.Detach();
+         return;
+      }
+
+      a_hResult = a_oSelection->GetCount( &a_dwSelCount );
+      if( FAILED( a_hResult ) )
+      {
+         a_dwSelCount = 0;
+      }
+      // If we have a large number of selected items, update the status text
+      // before we ask for the total size, so the user can at least see we are
+      // doing something.
+      if( a_dwSelCount >= FILE_SIZE_UPDATING_THRESHOLD )
+      {
+         SetFileSizePaneText( _T("Updating ...") );
+      }
+
+      //a_hResult = a_oSelection->GetPropertyStore( GPS_DEFAULT, IID_PPV_ARGS( &a_oPropStore ) );
+      a_hResult = a_oSelection->GetPropertyStore( GPS_FASTPROPERTIESONLY, IID_PPV_ARGS( &a_oPropStore ) );
+      if( FAILED( a_hResult ) )
+      {
+         a_oPropStore.Detach();
+      }
+
+      if( a_oPropStore )
+      {
+         a_hResult = a_oPropStore->GetValue( PKEY_Size, &a_vtTotalSize );
+         if( SUCCEEDED( a_hResult ) )
+         {
+            a_bHaveValue = true;
+         }
+      }
+
+      // GetPropertyStore can fail sometimes if there are invalid
+      // (or incorrectly formatted) files selected, so we have a fallback where
+      // we just iterate the selection manually.
+      if( !a_bHaveValue )
+      {
+         // Accumulate the size of each item.
+         ULONGLONG a_ullTotal = 0;
+         ULONGLONG a_ullTemp = 0;
+         for( DWORD i = 0; i < a_dwSelCount; ++i )
+         {
+            CComPtr<IShellItem> a_oShellItem;
+            a_hResult = a_oSelection->GetItemAt( i, &a_oShellItem );
+            if( SUCCEEDED( a_hResult ) && a_oShellItem )
+            {
+               CComQIPtr<IShellItem2> a_oShellItem2( a_oShellItem );
+               if( a_oShellItem2 )
+               {
+                  a_hResult = a_oShellItem2->GetUInt64( PKEY_Size, &a_ullTemp );
+                  if( SUCCEEDED( a_hResult ) )
+                  {
+                     a_ullTotal += a_ullTemp;
+                  }
+               }
+            }
+         }
+
+         a_hResult = InitPropVariantFromUInt64( a_ullTotal, &a_vtTotalSize );
+         if( FAILED( a_hResult ) )
+         {
+            PropVariantInit( &a_vtTotalSize );
+         }
+      }
+
+      // Format the display string, by asking the property system if we have
+      // a valid IPropertySystem, or manually otherwise.
+      if( c_oPropertySystem )
+      {
+         c_oPropertySystem->FormatForDisplay( PKEY_Size,
+                                              a_vtTotalSize,
+                                              PDFF_DEFAULT,
+                                              a_atcText,
+                                              _countof( a_atcText ) );
+      }
+      else
+      {
+         // FIXME
+         // Use some other method besides the IPropertySystem to format the
+         // value. I don't really feel like writing that.
+         ULONGLONG a_ullTotalSize = 0;
+         a_hResult = PropVariantToUInt64( a_vtTotalSize, &a_ullTotalSize );
+         if( FAILED( a_hResult ) )
+         {
+            a_ullTotalSize = 0;
+         }
+         // PRIu64 expands into two narrow literals so we can't use it for now.
+         // Use %llu explicitly.
+         // http://stackoverflow.com/a/21789920
+         _sntprintf_s( a_atcText, _TRUNCATE, _T("%llu"), a_ullTotalSize );
+      }
+
+      PropVariantClear( &a_vtTotalSize );
+   }
+
+   SetFileSizePaneText( a_atcText );
+}
+
+void CDisplayFileSize::SetFileSizePaneText( const TCHAR * p_ptcText )
+{
+   SendMessage( c_hStatusBar, SB_SETTEXTW, MAKEWPARAM( MAKEWORD( c_iPartIndex, SBT_POPOUT ), 0 ), reinterpret_cast<LPARAM>(p_ptcText) );
+}
+
+LRESULT CALLBACK CDisplayFileSize::StatusBarProcS( HWND hWnd,
+                                                   UINT uMsg,
+                                                   WPARAM wParam,
+                                                   LPARAM lParam,
+                                                   UINT_PTR uIdSubclass,
+                                                   DWORD_PTR dwRefData )
+{
+   return reinterpret_cast<CDisplayFileSize*>(dwRefData)->StatusBarProc( hWnd, uMsg, wParam, lParam, uIdSubclass );
+}
+
+LRESULT CALLBACK CDisplayFileSize::StatusBarProc( HWND hWnd,
+                                                  UINT uMsg,
+                                                  WPARAM wParam,
+                                                  LPARAM lParam,
+                                                  UINT_PTR uIdSubclass )
+{
+   LRESULT a_lResult = 0;
+   bool a_bCallDefProc = true;
+
+   UNREFERENCED_PARAMETER( uIdSubclass );
+
+   switch( uMsg )
+   {
+      case WM_NCDESTROY:
+         // Per Raymond Chen (http://blogs.msdn.com/oldnewthing/archive/2003/11/11/55653.aspx),
+         // we must remove our subclass when the window is destroyed, if we haven't already done so.
+         OnWmNcDestroy();
+         break;
+
+      case WM_TIMER:
+         OnWmTimer( static_cast<UINT_PTR>(wParam) );
+         break;
+
+      case SB_SETPARTS:
+         a_lResult = OnSbSetParts( static_cast<int>(wParam), reinterpret_cast<int*>(lParam) );
+         a_bCallDefProc = false;
+         break;
+
+      case SB_SETTEXTW:
+         OnSbSetTextW( static_cast<int>(LOBYTE( LOWORD( wParam ) )), static_cast<int>(HIBYTE( LOWORD( wParam ) )), reinterpret_cast<const WCHAR*>(lParam) );
+         break;
+
+      default:
+      {
+         // For debugging.
+         #if DEBUG_LOGGING
+         TCHAR a_atcTemp[MAX_TEXT] = {0};
+         _sntprintf_s( a_atcTemp, _TRUNCATE, _T("Msg: 0x%08X (%d)  0x%08X 0x%08X\n"), uMsg, uMsg, wParam, lParam );
+         OutputDebugString( a_atcTemp );
+         #endif
+         break;
+      }
+   }
+
+   if( a_bCallDefProc )
+   {
+      a_lResult = DefSubclassProc( hWnd, uMsg, wParam, lParam );
+   }
+   return a_lResult;
+}
+
+void CDisplayFileSize::OnWmNcDestroy()
+{
+   RemoveWindowSubclass( c_hStatusBar, StatusBarProcS, 0 );
+}
+
+void CDisplayFileSize::OnWmTimer( UINT_PTR p_uiTimerId )
+{
+   KillTimer( c_hStatusBar, p_uiTimerId );
+   switch( p_uiTimerId )
+   {
+      case IDT_UPDATE_FILE_SIZE_PANE:
+         DoFileSizePaneUpdate();
+         break;
+   }
+}
+
+LRESULT CDisplayFileSize::OnSbSetParts( int p_iPartCount, int * p_piParts )
+{
+   #if DEBUG_LOGGING
+   TCHAR a_atcTemp[MAX_TEXT] = {0};
+   _sntprintf_s( a_atcTemp, _TRUNCATE, _T("SetParts: %d\n"), p_iPartCount );
+   OutputDebugString( a_atcTemp );
+   #endif
+
+   int a_iPartCount = 0;
+   int a_aiParts[MAX_STATUS_BAR_PARTS] = {0};
+   RECT a_stClient = {0};
+   GetClientRect( c_hStatusBar, &a_stClient );
+
+   c_iPartIndex = 0;
+
+   // Make sure the part count is valid. Note we subtract 1 from the max parts
+   // allowed since we will insert our own part below if necessary.
+   if( p_iPartCount < 0 || p_iPartCount > (MAX_STATUS_BAR_PARTS - 1) )
+   {
+      return FALSE;
+   }
+
+   // Insert the maximum of the requested number of parts or 3, so we always
+   // have room for the status help text, the file size and the zone icon
+   // ("My Computer", "Internet", etc).
+   a_iPartCount = max( p_iPartCount, MINIMUM_PART_COUNT );
+   c_iPartIndex = 1;
+   if( p_piParts && p_iPartCount >= MINIMUM_PART_COUNT )
+   {
+      // Use the requested part layout directly and just overwrite whatever
+      // our caller was going to place at index 1 when we set the text later.
+      memcpy( a_aiParts, p_piParts, p_iPartCount * sizeof( a_aiParts[0] ) );
+   }
+   else
+   {
+      // There are no requested parts. Just insert a dummy part to the left of
+      // our part, so our part is near the right edge rather than the left edge.
+      // The size of these parts may not consistent with the sizes explorer uses,
+      // but they work OK for me.
+      a_aiParts[0] = a_stClient.right - MY_COMPUTER_SIZE_PART_WIDTH - FILE_SIZE_PART_WIDTH;
+      a_aiParts[1] = a_stClient.right - MY_COMPUTER_SIZE_PART_WIDTH;
+      a_aiParts[2] = -1;
+   }
+
+   return DefSubclassProc( c_hStatusBar, SB_SETPARTS, static_cast<WPARAM>(a_iPartCount), reinterpret_cast<LPARAM>(a_aiParts) );
+}
+
+LRESULT CDisplayFileSize::OnSbSetTextW( int p_iPartIndex, int p_iDrawOp, const WCHAR * p_pwcText )
+{
+   #if DEBUG_LOGGING
+   TCHAR a_atcTemp[MAX_TEXT] = {0};
+   _sntprintf_s( a_atcTemp, _TRUNCATE, _T("SetText: %d %d %s\n"), p_iPartIndex, p_iDrawOp, p_pwcText );
+   OutputDebugString( a_atcTemp );
+   #else
+   UNREFERENCED_PARAMETER( p_pwcText );
+   UNREFERENCED_PARAMETER( p_iDrawOp );
+   #endif
+
+   // The default Shell View seems to send this message as the selection is
+   // changed, which gives us a reasonable hook to use to trigger updates to
+   // our status pane.
+   // This is not optimal, since this message is sent in other cases as well,
+   // where we don't need to trigger an update.  For now it works well enough
+   // for me, but any improvements are welcome.
+
+   // Only trigger an update if the part being updated is not *our* part, since
+   // we don't want to trigger more updates as we change the text on our part.
+   if( p_iPartIndex != c_iPartIndex )
+   {
+      TriggerFileSizePaneUpdate();
+   }
+
+   return TRUE;
+}
