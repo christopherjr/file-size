@@ -18,13 +18,6 @@
 
 // ToDo:
 //
-// Try to subclass the main view to handle the ESCAPE key.  This could then
-//  perform a deselect-all operation, which I would find useful.
-//
-// The file size calculation and update code is running each time we activate
-//  an explorer window, even if the update is not necessary. We should put in
-//  some filtering so it only runs when the size actually needs to be updated.
-//
 // Add disk free space display for appropriate folders (not sure how this is
 //  done on XP).
 
@@ -339,7 +332,6 @@ void CDisplayFileSize::DoFileSizePaneUpdate()
       CComPtr<IShellItemArray> a_oSelection;
       CComPtr<IPropertyStore> a_oPropStore;
       DWORD a_dwSelCount = 0;
-      int a_iItemCount = 0;
       bool a_bHaveValue = false;
       PROPVARIANT a_vtTotalSize;
       PropVariantInit( &a_vtTotalSize );
