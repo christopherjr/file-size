@@ -260,6 +260,7 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="DispInterfaceBase.h" />
     <ClInclude Include="DisplayFileSize.h" />
     <ClInclude Include="dllmain.h" />
     <ClInclude Include="Resource.h" />

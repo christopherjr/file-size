@@ -8,6 +8,7 @@
 #include "resource.h"       // main symbols
 #include "StatusBarExt_i.h"
 
+#include "DispInterfaceBase.h"
 
 #if defined(_WIN32_WCE) && !defined(_CE_DCOM) && !defined(_CE_ALLOW_SINGLE_THREADED_OBJECTS_IN_MTA)
 #error "Single-threaded COM objects are not properly supported on Windows CE platform, such as the Windows Mobile platforms that do not include full DCOM support. Define _CE_ALLOW_SINGLE_THREADED_OBJECTS_IN_MTA to force ATL to support creating single-thread COM object's and allow use of it's single-threaded COM object implementations. The threading model in your rgs file was set to 'Free' as that is the only threading model supported in non DCOM Windows CE platforms."
@@ -15,17 +16,13 @@
 
 using namespace ATL;
 
-// For handling the OnDocumentComplete event.
-extern ATL::_ATL_FUNC_INFO DocumentComplete2Struct;
-
 // CDisplayFileSize
 
 class ATL_NO_VTABLE CDisplayFileSize :
    public CComObjectRootEx<CComSingleThreadModel>,
    public CComCoClass<CDisplayFileSize, &CLSID_DisplayFileSize>,
    public IObjectWithSiteImpl<CDisplayFileSize>,
-   public IDispatchImpl<IDisplayFileSize, &IID_IDisplayFileSize, &LIBID_StatusBarExtLib, /*wMajor =*/ 1, /*wMinor =*/ 0>,
-   public IDispEventImpl<1, CDisplayFileSize, &DIID_DWebBrowserEvents2, &LIBID_SHDocVw, 1, 1>
+   public IDispatchImpl<IDisplayFileSize, &IID_IDisplayFileSize, &LIBID_StatusBarExtLib, /*wMajor =*/ 1, /*wMinor =*/ 0>
 {
 public:
    CDisplayFileSize();
@@ -39,11 +36,6 @@ BEGIN_COM_MAP(CDisplayFileSize)
    COM_INTERFACE_ENTRY(IDispatch)
    COM_INTERFACE_ENTRY(IObjectWithSite)
 END_COM_MAP()
-
-BEGIN_SINK_MAP(CDisplayFileSize)
-    SINK_ENTRY_INFO(1, DIID_DWebBrowserEvents2, DISPID_DOCUMENTCOMPLETE, OnDocumentComplete, &DocumentComplete2Struct)
-END_SINK_MAP()
-
 
    DECLARE_PROTECT_FINAL_CONSTRUCT()
 
@@ -59,9 +51,6 @@ END_SINK_MAP()
 public:
    // IObjectWithSite
    STDMETHOD(SetSite)(IUnknown *pUnkSite);
-
-   // WebBrowser2 events
-   STDMETHOD(OnDocumentComplete)(IDispatch *pDisp, VARIANT *pvarURL);
 
 private:
    // Helpers.
@@ -128,14 +117,35 @@ private:
    };
 
 private:
+   // Event handler for DWebBrowserEvents2
+   class CWebBrowser2EventsSink :
+      public CDispInterfaceBase<DWebBrowserEvents2>
+   {
+   public:
+      CWebBrowser2EventsSink( CDisplayFileSize * p_poOuter );
+
+      HRESULT SimpleInvoke(
+         DISPID dispid, DISPPARAMS *pdispparams, VARIANT *pvarResult );
+
+   private:
+      CDisplayFileSize * c_poOuter;
+   };
+
+   HRESULT OnWebBrowser2EventsInvoke( DISPID p_eDispId, DISPPARAMS * p_poDispParams, VARIANT * p_poVarResult );
+
+   // Handlers for individual DWebBrowserEvents2 DISPIDs.
+   HRESULT OnWebBrowser2DocumentComplete();
+
+private:
    HWND c_hExplorerWnd;
    HWND c_hStatusBar;
    int c_iPartIndex;
-   bool c_bAdvised;
    CComPtr<IUnknown> c_oSite;
    CComQIPtr<IServiceProvider> c_oServiceProvider;
    CComPtr<IPropertySystem> c_oPropertySystem;
    CComPtr<IFolderView2> c_oFolderView;
+
+   CComPtr<CWebBrowser2EventsSink> c_oWebBrowser2Sink;
 };
 
 OBJECT_ENTRY_AUTO(__uuidof(DisplayFileSize), CDisplayFileSize)

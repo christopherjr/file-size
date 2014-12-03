@@ -40,9 +40,6 @@
 // Timer ID for disk space status pane update.
 #define IDT_UPDATE_FILE_SIZE_PANE 1
 
-// For handling the OnDocumentComplete event.
-ATL::_ATL_FUNC_INFO DocumentComplete2Struct = {CC_STDCALL, VT_EMPTY, 2, {VT_DISPATCH, VT_BYREF|VT_VARIANT}};
-
 // Find the status bar window given a handle to the main explorer window.
 // Obviously not optimal.
 // We could possibly interrogate the browser for the status bar instead.
@@ -79,9 +76,9 @@ HWND FindStatusBar( HWND p_hExplorerWnd )
 CDisplayFileSize::CDisplayFileSize() :
    c_hExplorerWnd( NULL ),
    c_hStatusBar( NULL ),
-   c_iPartIndex( 0 ),
-   c_bAdvised( false )
+   c_iPartIndex( 0 )
 {
+   c_oWebBrowser2Sink.Attach(new CWebBrowser2EventsSink( this ));
 }
 
 CDisplayFileSize::~CDisplayFileSize()
@@ -107,19 +104,18 @@ HRESULT CDisplayFileSize::SetSite(IUnknown *pUnkSite)
    }
 
    // Now detach from the existing site and other interfaces.
-   if( c_oSite )
+   // Disconnect event handlers and release other interfaces retrieved from the
+   // site before we release the site.
+   if( c_oWebBrowser2Sink )
    {
-      if( c_bAdvised )
-      {
-         DispEventUnadvise( c_oSite );
-         c_bAdvised = false;
-      }
-
-      c_oSite.Release();
+      c_oWebBrowser2Sink->Disconnect();
    }
+
    c_oServiceProvider.Release();
    c_oPropertySystem.Release();
    c_oFolderView.Release();
+
+   c_oSite.Release();
 
    c_oSite.Attach( pUnkSite );
    c_hExplorerWnd = NULL;
@@ -162,23 +158,33 @@ HRESULT CDisplayFileSize::SetSite(IUnknown *pUnkSite)
          }
 
          // Register for events now that we are all hooked up to the UI.
-         a_hResult = DispEventAdvise( a_oBrowser );
-         if( SUCCEEDED( a_hResult ) )
-         {
-            c_bAdvised = true;
-         }
+         // Not much we can do if this fails.
+         c_oWebBrowser2Sink->Connect( a_oBrowser );
       }
    }
    return S_OK;
 }
 
-HRESULT STDMETHODCALLTYPE CDisplayFileSize::OnDocumentComplete(IDispatch * pDisp, VARIANT * pvarURL)
+HRESULT CDisplayFileSize::OnWebBrowser2EventsInvoke( DISPID p_eDispId, DISPPARAMS * p_poDispParams, VARIANT * p_poVarResult )
 {
    HRESULT a_hResult = S_OK;
 
-   UNREFERENCED_PARAMETER( pDisp );
-   UNREFERENCED_PARAMETER( pvarURL );
+   UNREFERENCED_PARAMETER( p_poDispParams );
+   UNREFERENCED_PARAMETER( p_poVarResult );
 
+   switch( p_eDispId )
+   {
+      case DISPID_DOCUMENTCOMPLETE:
+         a_hResult = OnWebBrowser2DocumentComplete();
+         break;
+   }
+
+   return a_hResult;
+}
+
+HRESULT CDisplayFileSize::OnWebBrowser2DocumentComplete()
+{
+   HRESULT a_hResult = S_OK;
    if( c_oServiceProvider )
    {
       IFolderView2 * a_poFolderView = NULL;
@@ -482,3 +488,18 @@ LRESULT CDisplayFileSize::OnSbSetTextW( int p_iPartIndex, int p_iDrawOp, const W
 
    return TRUE;
 }
+
+
+// CDisplayFileSize::CWebBrowser2EventsSink
+
+CDisplayFileSize::CWebBrowser2EventsSink::CWebBrowser2EventsSink( CDisplayFileSize * p_poOuter ) :
+   c_poOuter( p_poOuter )
+{
+}
+
+HRESULT CDisplayFileSize::CWebBrowser2EventsSink::SimpleInvoke(
+   DISPID dispid, DISPPARAMS * pdispparams, VARIANT * pvarResult )
+{
+   return c_poOuter->OnWebBrowser2EventsInvoke( dispid, pdispparams, pvarResult );
+}
+
