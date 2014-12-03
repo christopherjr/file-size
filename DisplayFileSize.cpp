@@ -76,6 +76,7 @@ HWND FindStatusBar( HWND p_hExplorerWnd )
 
 CDisplayFileSize::CDisplayFileSize() :
    c_hExplorerWnd( NULL ),
+   c_hDefView( NULL ),
    c_hStatusBar( NULL ),
    c_iPartIndex( 0 ),
    c_bUseSbSetTextSelectionChange( false )
@@ -99,6 +100,11 @@ HRESULT CDisplayFileSize::SetSite(IUnknown *pUnkSite)
       pUnkSite->AddRef();
    }
 
+   if( c_hDefView )
+   {
+      RemoveWindowSubclass( c_hDefView, DefViewProcS, 0 );
+   }
+
    // Detach from the status bar window so we won't try to update it while we
    // are in the middle of this work.
    if( c_hStatusBar )
@@ -120,6 +126,7 @@ HRESULT CDisplayFileSize::SetSite(IUnknown *pUnkSite)
    }
 
    c_oWebBrowser.Release();
+   c_oShellBrowser.Release();
    c_oServiceProvider.Release();
    c_oPropertySystem.Release();
    c_oFolderView.Release();
@@ -128,6 +135,7 @@ HRESULT CDisplayFileSize::SetSite(IUnknown *pUnkSite)
 
    c_oSite.Attach( pUnkSite );
    c_hExplorerWnd = NULL;
+   c_hDefView = NULL;
    c_hStatusBar = NULL;
 
    a_hResult = IObjectWithSiteImpl<CDisplayFileSize>::SetSite(pUnkSite);
@@ -156,14 +164,6 @@ HRESULT CDisplayFileSize::SetSite(IUnknown *pUnkSite)
          if( SUCCEEDED( a_hResult ) && a_pHWnd )
          {
             c_hExplorerWnd = reinterpret_cast<HWND>(a_pHWnd);
-
-            // OK, so now we need to find the status bar and subclass it so we
-            // can take control of it.
-            c_hStatusBar = FindStatusBar( c_hExplorerWnd );
-            if( c_hStatusBar )
-            {
-               SetWindowSubclass( c_hStatusBar, StatusBarProcS, 0, reinterpret_cast<DWORD_PTR>(this) );
-            }
          }
 
          // Register for events now that we are all hooked up to the UI.
@@ -211,6 +211,34 @@ HRESULT CDisplayFileSize::OnWebBrowser2DocumentComplete()
          c_oFolderView.Attach( a_poFolderView );
       }
 
+      c_oShellBrowser.Release();
+      a_hResult = c_oServiceProvider->QueryService( SID_STopLevelBrowser,
+                                                    IID_PPV_ARGS( &c_oShellBrowser ) );
+
+      // Try to get the status bar from the IShellBrowser first.  If we can't
+      // find it that way, search the window hierarchy.
+      if( c_oShellBrowser )
+      {
+         a_hResult = c_oShellBrowser->GetControlWindow( FCW_STATUS, &c_hStatusBar );
+         if( FAILED( a_hResult ) )
+         {
+            c_hStatusBar = NULL;
+         }
+      }
+
+      if( !c_hStatusBar )
+      {
+         // OK, try to find the status bar via the window hierarchy.
+         c_hStatusBar = FindStatusBar( c_hExplorerWnd );
+      }
+
+      if( c_hStatusBar )
+      {
+         // However we managed to find it, we will subclass it now so we can
+         // add back the size pane.
+         SetWindowSubclass( c_hStatusBar, StatusBarProcS, 0, reinterpret_cast<DWORD_PTR>(this) );
+      }
+
       c_oShellFolderViewSink->Disconnect();
       c_bUseSbSetTextSelectionChange = true;
       if( c_oWebBrowser )
@@ -232,6 +260,28 @@ HRESULT CDisplayFileSize::OnWebBrowser2DocumentComplete()
                   // changes rather than the SB_SETTEXT message approach.
                   c_bUseSbSetTextSelectionChange = false;
                }
+            }
+         }
+      }
+
+      // Subclass the shell view so we can intercept some keys for navigation.
+      // We want to query for IID_CDefView before attempting to subclass the
+      // DirectUIHWnd child of the DefView, to make sure we only subclass the
+      // default view and don't interfere with custom namespace views.
+      // http://msdn.microsoft.com/en-us/library/windows/desktop/bb774834.aspx
+
+      CComPtr<IShellView> a_oShellView;
+      a_hResult = c_oShellBrowser->QueryActiveShellView( &a_oShellView );
+      if( SUCCEEDED( a_hResult ) && a_oShellView )
+      {
+         CComQIPtr<IShellView, &IID_CDefView> a_oDefViewQuery( a_oShellView );
+         if( a_oDefViewQuery )
+         {
+            a_hResult = a_oShellView->GetWindow( &c_hDefView );
+            if( SUCCEEDED( a_hResult ) )
+            {
+               c_hDefView = GetWindow( c_hDefView, GW_CHILD );
+               SetWindowSubclass( c_hDefView, DefViewProcS, 0, reinterpret_cast<DWORD_PTR>(this) );
             }
          }
       }
@@ -426,11 +476,11 @@ LRESULT CALLBACK CDisplayFileSize::StatusBarProc( HWND hWnd,
       case WM_NCDESTROY:
          // Per Raymond Chen (http://blogs.msdn.com/oldnewthing/archive/2003/11/11/55653.aspx),
          // we must remove our subclass when the window is destroyed, if we haven't already done so.
-         OnWmNcDestroy();
+         OnSbWmNcDestroy();
          break;
 
       case WM_TIMER:
-         OnWmTimer( static_cast<UINT_PTR>(wParam) );
+         OnSbWmTimer( static_cast<UINT_PTR>(wParam) );
          break;
 
       case SB_SETPARTS:
@@ -461,12 +511,12 @@ LRESULT CALLBACK CDisplayFileSize::StatusBarProc( HWND hWnd,
    return a_lResult;
 }
 
-void CDisplayFileSize::OnWmNcDestroy()
+void CDisplayFileSize::OnSbWmNcDestroy()
 {
    RemoveWindowSubclass( c_hStatusBar, StatusBarProcS, 0 );
 }
 
-void CDisplayFileSize::OnWmTimer( UINT_PTR p_uiTimerId )
+void CDisplayFileSize::OnSbWmTimer( UINT_PTR p_uiTimerId )
 {
    KillTimer( c_hStatusBar, p_uiTimerId );
    switch( p_uiTimerId )
@@ -556,6 +606,119 @@ LRESULT CDisplayFileSize::OnSbSetTextW( int p_iPartIndex, int p_iDrawOp, const W
    }
 
    return TRUE;
+}
+
+
+
+LRESULT CALLBACK CDisplayFileSize::DefViewProcS( HWND hWnd,
+                                                 UINT uMsg,
+                                                 WPARAM wParam,
+                                                 LPARAM lParam,
+                                                 UINT_PTR uIdSubclass,
+                                                 DWORD_PTR dwRefData )
+{
+   return reinterpret_cast<CDisplayFileSize*>(dwRefData)->DefViewProc( hWnd, uMsg, wParam, lParam, uIdSubclass );
+}
+
+LRESULT CALLBACK CDisplayFileSize::DefViewProc( HWND hWnd,
+                                                UINT uMsg,
+                                                WPARAM wParam,
+                                                LPARAM lParam,
+                                                UINT_PTR uIdSubclass )
+{
+   LRESULT a_lResult = 0;
+   bool a_bCallDefProc = true;
+
+   UNREFERENCED_PARAMETER( uIdSubclass );
+
+   switch( uMsg )
+   {
+      case WM_NCDESTROY:
+         OnDvWmNcDestroy();
+         break;
+
+      case WM_KEYDOWN:
+         if( OnDvWmKeyDown( static_cast<UINT>(wParam), static_cast<UINT>(lParam) ) )
+         {
+            a_bCallDefProc = false;
+         }
+         break;
+
+      default:
+      {
+         // For debugging.
+         #if DEBUG_LOGGING
+         TCHAR a_atcTemp[MAX_TEXT] = {0};
+         _sntprintf_s( a_atcTemp, _TRUNCATE, _T("Msg: 0x%08X (%d)  0x%08X 0x%08X\n"), uMsg, uMsg, wParam, lParam );
+         OutputDebugString( a_atcTemp );
+         #endif
+         break;
+      }
+   }
+
+   if( a_bCallDefProc )
+   {
+      a_lResult = DefSubclassProc( hWnd, uMsg, wParam, lParam );
+   }
+   return a_lResult;
+}
+
+void CDisplayFileSize::OnDvWmNcDestroy()
+{
+   RemoveWindowSubclass( c_hDefView, DefViewProcS, 0 );
+}
+
+bool CDisplayFileSize::OnDvWmKeyDown( UINT p_uiVK, UINT p_uiFlags )
+{
+   bool a_bHandled = false;
+
+   UNREFERENCED_PARAMETER( p_uiFlags );
+
+   switch( p_uiVK )
+   {
+      case 'U':
+         if( (GetKeyState( VK_CONTROL ) & 0x8000000) != 0 )
+         {
+            if( !c_oShellBrowser )
+            {
+               break;
+            }
+
+            // Navigate up one level.
+            c_oShellBrowser->BrowseObject( NULL, SBSP_SAMEBROWSER | SBSP_PARENT );
+            a_bHandled = true;
+         }
+         break;
+
+      case VK_ESCAPE:
+      {
+         if( !c_oFolderView )
+         {
+            break;
+         }
+
+         // If there are any selected items, deselect them all.
+         // Otherwise, trigger an update to show the size of all the
+         // items in the folder.  This allows the user to show the size
+         // of a folder when they first navigate to it, by clicking Escape.
+         int a_iSelectedCount = 0;
+         c_oFolderView->ItemCount( SVGIO_SELECTION, &a_iSelectedCount );
+         if( a_iSelectedCount )
+         {
+            c_oFolderView->SelectItem( -1, SVSI_DESELECTOTHERS );
+            a_bHandled = true;
+         }
+
+         // This is nice if we want to go back to the beginning of the
+         // file list after we have already selected a file in the view.
+         // Then we don't have to use the Home key in order to perform a
+         // new keyboard search in the view.
+         c_oFolderView->SelectItem( 0, SVSI_FOCUSED );
+         break;
+      }
+   }
+
+   return a_bHandled;
 }
 
 
