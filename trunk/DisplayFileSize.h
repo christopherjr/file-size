@@ -117,6 +117,20 @@ private:
    };
 
 private:
+   // Event handler for DShellFolderViewEvents
+   class CShellFolderViewEventsSink :
+      public CDispInterfaceBase<DShellFolderViewEvents>
+   {
+   public:
+      CShellFolderViewEventsSink( CDisplayFileSize * p_poOuter );
+
+      HRESULT SimpleInvoke(
+         DISPID dispid, DISPPARAMS *pdispparams, VARIANT *pvarResult );
+
+   private:
+      CDisplayFileSize * c_poOuter;
+   };
+
    // Event handler for DWebBrowserEvents2
    class CWebBrowser2EventsSink :
       public CDispInterfaceBase<DWebBrowserEvents2>
@@ -132,20 +146,27 @@ private:
    };
 
    HRESULT OnWebBrowser2EventsInvoke( DISPID p_eDispId, DISPPARAMS * p_poDispParams, VARIANT * p_poVarResult );
+   HRESULT OnShellFolderEventsInvoke( DISPID p_eDispId, DISPPARAMS * p_poDispParams, VARIANT * p_poVarResult );
 
    // Handlers for individual DWebBrowserEvents2 DISPIDs.
    HRESULT OnWebBrowser2DocumentComplete();
+
+   // Handlers for individual DShellFolderViewEvents DISPIDs.
+   HRESULT OnShellFolderViewSelectionChanged();
 
 private:
    HWND c_hExplorerWnd;
    HWND c_hStatusBar;
    int c_iPartIndex;
+   bool c_bUseSbSetTextSelectionChange;
    CComPtr<IUnknown> c_oSite;
+   CComPtr<IWebBrowser2> c_oWebBrowser;
    CComQIPtr<IServiceProvider> c_oServiceProvider;
    CComPtr<IPropertySystem> c_oPropertySystem;
    CComPtr<IFolderView2> c_oFolderView;
 
    CComPtr<CWebBrowser2EventsSink> c_oWebBrowser2Sink;
+   CComPtr<CShellFolderViewEventsSink> c_oShellFolderViewSink;
 };
 
 OBJECT_ENTRY_AUTO(__uuidof(DisplayFileSize), CDisplayFileSize)

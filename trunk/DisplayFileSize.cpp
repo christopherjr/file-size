@@ -12,6 +12,7 @@
 
 #include <Shobjidl.h>
 #include <Shlguid.h>
+#include <shdispid.h>
 #include <propkey.h>
 #include <propvarutil.h>
 
@@ -38,7 +39,7 @@
 #define DEBUG_LOGGING 0
 
 // Timer ID for disk space status pane update.
-#define IDT_UPDATE_FILE_SIZE_PANE 1
+#define IDT_UPDATE_FILE_SIZE_PANE 0xf11e51fe
 
 // Find the status bar window given a handle to the main explorer window.
 // Obviously not optimal.
@@ -76,9 +77,11 @@ HWND FindStatusBar( HWND p_hExplorerWnd )
 CDisplayFileSize::CDisplayFileSize() :
    c_hExplorerWnd( NULL ),
    c_hStatusBar( NULL ),
-   c_iPartIndex( 0 )
+   c_iPartIndex( 0 ),
+   c_bUseSbSetTextSelectionChange( false )
 {
    c_oWebBrowser2Sink.Attach(new CWebBrowser2EventsSink( this ));
+   c_oShellFolderViewSink.Attach(new CShellFolderViewEventsSink( this ));
 }
 
 CDisplayFileSize::~CDisplayFileSize()
@@ -111,6 +114,12 @@ HRESULT CDisplayFileSize::SetSite(IUnknown *pUnkSite)
       c_oWebBrowser2Sink->Disconnect();
    }
 
+   if( c_oShellFolderViewSink )
+   {
+      c_oShellFolderViewSink->Disconnect();
+   }
+
+   c_oWebBrowser.Release();
    c_oServiceProvider.Release();
    c_oPropertySystem.Release();
    c_oFolderView.Release();
@@ -159,7 +168,8 @@ HRESULT CDisplayFileSize::SetSite(IUnknown *pUnkSite)
 
          // Register for events now that we are all hooked up to the UI.
          // Not much we can do if this fails.
-         c_oWebBrowser2Sink->Connect( a_oBrowser );
+         c_oWebBrowser = a_oBrowser;
+         c_oWebBrowser2Sink->Connect( c_oWebBrowser );
       }
    }
    return S_OK;
@@ -200,9 +210,62 @@ HRESULT CDisplayFileSize::OnWebBrowser2DocumentComplete()
          // Note that attach does not AddRef, which is what we want.
          c_oFolderView.Attach( a_poFolderView );
       }
+
+      c_oShellFolderViewSink->Disconnect();
+      c_bUseSbSetTextSelectionChange = true;
+      if( c_oWebBrowser )
+      {
+         // How to get the right object to connect DShellFolderViewEvents.
+         // https://social.msdn.microsoft.com/Forums/ie/en-US/e558984e-d239-4dc1-b7e0-77041ba7c34e/sinking-dshellfolderviewevents-in-c-atl-bho-sink-not-firing?forum=ieextensiondevelopment
+
+         CComPtr<IDispatch> a_poDisp;
+         a_hResult = c_oWebBrowser->get_Document( &a_poDisp );
+         if( SUCCEEDED( a_hResult ) )
+         {
+            CComQIPtr<IShellFolderViewDual> a_oShellFolder( a_poDisp );
+            if( a_oShellFolder )
+            {
+               a_hResult = c_oShellFolderViewSink->Connect( a_oShellFolder );
+               if( SUCCEEDED( a_hResult ) )
+               {
+                  // We can use shell folder view events to handle selection
+                  // changes rather than the SB_SETTEXT message approach.
+                  c_bUseSbSetTextSelectionChange = false;
+               }
+            }
+         }
+      }
    }
 
    return a_hResult;
+}
+
+HRESULT CDisplayFileSize::OnShellFolderEventsInvoke( DISPID p_eDispId, DISPPARAMS * p_poDispParams, VARIANT * p_poVarResult )
+{
+   HRESULT a_hResult = S_OK;
+
+   UNREFERENCED_PARAMETER( p_poDispParams );
+   UNREFERENCED_PARAMETER( p_poVarResult );
+   
+   switch( p_eDispId ) {
+      case DISPID_SELECTIONCHANGED:
+         a_hResult = OnShellFolderViewSelectionChanged();
+         break;
+   }
+
+   return a_hResult;
+}
+
+HRESULT CDisplayFileSize::OnShellFolderViewSelectionChanged()
+{
+   #if DEBUG_LOGGING
+   OutputDebugString( _T("Selection changed\n") );
+   #endif
+
+   // Trigger a timed update rather than updating immediately.
+   TriggerFileSizePaneUpdate();
+
+   return S_OK;
 }
 
 void CDisplayFileSize::TriggerFileSizePaneUpdate()
@@ -472,18 +535,24 @@ LRESULT CDisplayFileSize::OnSbSetTextW( int p_iPartIndex, int p_iDrawOp, const W
    UNREFERENCED_PARAMETER( p_iDrawOp );
    #endif
 
-   // The default Shell View seems to send this message as the selection is
-   // changed, which gives us a reasonable hook to use to trigger updates to
-   // our status pane.
-   // This is not optimal, since this message is sent in other cases as well,
-   // where we don't need to trigger an update.  For now it works well enough
-   // for me, but any improvements are welcome.
-
-   // Only trigger an update if the part being updated is not *our* part, since
-   // we don't want to trigger more updates as we change the text on our part.
-   if( p_iPartIndex != c_iPartIndex )
+   // This message is used to trigger an update to the status bar only if we
+   // were not able to successfully sink DWebBrowserEvents2 in order to be
+   // properly notified of selection changes from the explorer browser.
+   if( c_bUseSbSetTextSelectionChange )
    {
-      TriggerFileSizePaneUpdate();
+      // The default Shell View seems to send this message as the selection is
+      // changed, which gives us a reasonable hook to use to trigger updates to
+      // our status pane.
+      // This is not optimal, since this message is sent in other cases as well,
+      // where we don't need to trigger an update.  For now it works well enough
+      // for me, but any improvements are welcome.
+
+      // Only trigger an update if the part being updated is not *our* part, since
+      // we don't want to trigger more updates as we change the text on our part.
+      if( p_iPartIndex != c_iPartIndex )
+      {
+         TriggerFileSizePaneUpdate();
+      }
    }
 
    return TRUE;
@@ -501,5 +570,19 @@ HRESULT CDisplayFileSize::CWebBrowser2EventsSink::SimpleInvoke(
    DISPID dispid, DISPPARAMS * pdispparams, VARIANT * pvarResult )
 {
    return c_poOuter->OnWebBrowser2EventsInvoke( dispid, pdispparams, pvarResult );
+}
+
+
+// CDisplayFileSize::CShellFolderViewEventsSink
+
+CDisplayFileSize::CShellFolderViewEventsSink::CShellFolderViewEventsSink( CDisplayFileSize * p_poOuter ) :
+   c_poOuter( p_poOuter )
+{
+}
+
+HRESULT CDisplayFileSize::CShellFolderViewEventsSink::SimpleInvoke(
+   DISPID dispid, DISPPARAMS * pdispparams, VARIANT * pvarResult )
+{
+   return c_poOuter->OnShellFolderEventsInvoke( dispid, pdispparams, pvarResult );
 }
 
