@@ -61,8 +61,8 @@ private:
    // Status bar message handlers.
    LRESULT OnSbSetTextW( int p_iPartIndex, int p_iDrawOp, const WCHAR * p_pwcText );
    LRESULT OnSbSetParts( int p_iPartCount, int * p_piParts );
-   void OnWmNcDestroy();
-   void OnWmTimer( UINT_PTR p_uiTimerId );
+   void OnSbWmNcDestroy();
+   void OnSbWmTimer( UINT_PTR p_uiTimerId );
 
    static LRESULT CALLBACK StatusBarProcS( HWND hWnd,
                                            UINT uMsg,
@@ -75,6 +75,23 @@ private:
                                    WPARAM wParam,
                                    LPARAM lParam,
                                    UINT_PTR uIdSubclass );
+
+   // DefView message handlers.
+   static LRESULT CALLBACK DefViewProcS( HWND hWnd,
+                                         UINT uMsg,
+                                         WPARAM wParam,
+                                         LPARAM lParam,
+                                         UINT_PTR uIdSubclass,
+                                         DWORD_PTR dwRefData );
+   LRESULT CALLBACK DefViewProc( HWND hWnd,
+                                 UINT uMsg,
+                                 WPARAM wParam,
+                                 LPARAM lParam,
+                                 UINT_PTR uIdSubclass );
+
+   void OnDvWmNcDestroy();
+   bool OnDvWmKeyDown( UINT p_uiVK, UINT p_uiFlags );
+
 private:
    // The width (in pixels) of the file size pane and MyComputer pane.
    // This is what explorer uses on my system but it will probably be different
@@ -156,11 +173,13 @@ private:
 
 private:
    HWND c_hExplorerWnd;
+   HWND c_hDefView;
    HWND c_hStatusBar;
    int c_iPartIndex;
    bool c_bUseSbSetTextSelectionChange;
    CComPtr<IUnknown> c_oSite;
    CComPtr<IWebBrowser2> c_oWebBrowser;
+   CComPtr<IShellBrowser> c_oShellBrowser;
    CComQIPtr<IServiceProvider> c_oServiceProvider;
    CComPtr<IPropertySystem> c_oPropertySystem;
    CComPtr<IFolderView2> c_oFolderView;
