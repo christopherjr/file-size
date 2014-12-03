@@ -339,15 +339,33 @@ void CDisplayFileSize::DoFileSizePaneUpdate()
       CComPtr<IShellItemArray> a_oSelection;
       CComPtr<IPropertyStore> a_oPropStore;
       DWORD a_dwSelCount = 0;
+      int a_iItemCount = 0;
       bool a_bHaveValue = false;
       PROPVARIANT a_vtTotalSize;
       PropVariantInit( &a_vtTotalSize );
 
-      a_hResult = c_oFolderView->GetSelection( TRUE, &a_oSelection );
+      // We could pass in true here to treat an empty selection as representing
+      // the whole folder, but getting the size property for that returns VT_EMPTY
+      // which we can't do much with.  It also wouldn't handle cases where the
+      // property store fails to give us a size value.
+      // So, if there is no selection just retrieve all the items in the folder
+      // and proceed as normal.
+      a_hResult = c_oFolderView->GetSelection( FALSE, &a_oSelection );
       if( FAILED( a_hResult ) )
       {
-         a_oSelection.Detach();
-         return;
+         if( a_hResult == S_FALSE ||
+             a_hResult == HRESULT_FROM_WIN32( ERROR_NOT_FOUND ) )
+         {
+            // No selection; no big deal.  Load up the whole folder.
+            a_hResult = c_oFolderView->Items( SVGIO_ALLVIEW, IID_PPV_ARGS( &a_oSelection ) );
+         }
+
+         if( FAILED( a_hResult ) )
+         {
+            a_oSelection.Detach();
+            SetFileSizePaneText( a_atcText );
+            return;
+         }
       }
 
       a_hResult = a_oSelection->GetCount( &a_dwSelCount );
@@ -355,6 +373,7 @@ void CDisplayFileSize::DoFileSizePaneUpdate()
       {
          a_dwSelCount = 0;
       }
+
       // If we have a large number of selected items, update the status text
       // before we ask for the total size, so the user can at least see we are
       // doing something.
@@ -707,6 +726,10 @@ bool CDisplayFileSize::OnDvWmKeyDown( UINT p_uiVK, UINT p_uiFlags )
          {
             c_oFolderView->SelectItem( -1, SVSI_DESELECTOTHERS );
             a_bHandled = true;
+         }
+         else
+         {
+            TriggerFileSizePaneUpdate();
          }
 
          // This is nice if we want to go back to the beginning of the
