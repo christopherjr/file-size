@@ -3,7 +3,7 @@
 // The license is not explicit.
 //
 // Changes from the original code are licensed as follows:
-// Copyright (C) 2014 Chris Richardson
+// Copyright (C) 2015 Chris Richardson
 // Please see the file file license.txt included with this project for licensing.
 // If no license.txt was included, see the following URL: http://opensource.org/licenses/MIT
 
